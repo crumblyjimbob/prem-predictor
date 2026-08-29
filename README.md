@@ -75,7 +75,26 @@ can wire specific data into them later if you want a queryable schema.
 
 ## Live league data
 
-Premier League tables, fixtures, scorers and assists are fetched on demand and
-refresh on their own every 30 minutes. If a lookup comes back empty, the panel
-hides itself rather than showing a broken table — hit **Refresh league data**
-and try again.
+Premier League tables, fixtures, live scores, top scorers and assists come from
+[football-data.org](https://www.football-data.org) through a small serverless
+proxy at `api/football.js` (the API token stays server-side and CORS is handled
+there). Get a free token and set it as `FOOTBALL_DATA_TOKEN` in your host's
+environment variables (it is **not** `VITE_`-prefixed, so it never reaches the
+browser).
+
+### The matchweek cut-over
+
+The restored league (matchweeks 1–2 and everyone's picks) was built on the old
+AI-generated fixtures, which don't line up with the real football API. So the
+real feed only drives **fixtures and live scoring from matchweek `API_FROM_GW`
+onward** (currently `3`, set near the top of `src/PremPredictor.jsx`). Earlier
+weeks stay exactly as restored and are managed by hand in the Admin tab. The live
+PL table + scorers/assists panel always uses the real API. Bump `API_FROM_GW` if
+you ever want to re-anchor where the automatic feed takes over.
+
+### Local development note
+
+`api/football.js` is a Vercel serverless function, so `/api/football` only runs
+under `vercel dev` (or once deployed) — a plain `npm run dev` serves the app but
+not the function. The standings/scores calls will simply fail locally under
+`vite dev`; run `vercel dev` if you want them working on your machine.

@@ -570,6 +570,30 @@ async function askClaude(prompt, maxTokens = 1000) {
   return (data.content || []).map((i) => (i.type === "text" ? i.text : "")).filter(Boolean).join("\n");
 }
 
+/* ---- live football data, via our /api/football serverless proxy ----
+   The original app read fixtures, scores, tables and scorers by asking Claude to
+   web-search — which only worked inside the Claude artifact sandbox. In production
+   we go through a real API (football-data.org) instead.
+
+   The restored league (matchweeks 1–2, everyone's picks) was built on the old
+   AI-generated fixtures, which won't match the real API. So the real feed only
+   drives fixtures/scoring from API_FROM_GW onward; earlier weeks stay manual and
+   untouched. The live PL table + scorers/assists panel always uses the real API.
+   Bump API_FROM_GW as the season moves on if you ever want to re-anchor it. */
+const API_FROM_GW = 3;
+const usesApi = (n) => (+n || 0) >= API_FROM_GW;
+
+// match clubs across sources without caring about "FC", punctuation or case
+const nameKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+async function fetchFootball(type, params = {}) {
+  const qs = new URLSearchParams({ type, ...params }).toString();
+  const res = await fetch(`/api/football?${qs}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || `football fetch failed (${res.status})`);
+  return data;
+}
+
 /* ================================== styles ================================= */
 
 const CSS = `
@@ -3174,27 +3198,27 @@ export default function PremPredictor() {
   }, []);
 
   const pullFixtures = useCallback(async (n, silent) => {
+    if (!usesApi(n)) {
+      // weeks before the cut-over were built on the old data and stay manual
+      if (!silent) toast(`Matchweek ${n} is managed by hand`, "err");
+      return null;
+    }
     if (!silent) setBusy(true);
     try {
-      const txt = await askClaude(
-        `Search the web for the English Premier League ${league?.season || "2026/27"} season fixture list for Matchweek ${n}. ` +
-        `Reply with ONLY a JSON array and nothing else — no prose, no markdown fences. ` +
-        `Format: [{"h":"Home team","a":"Away team","ko":"2026-08-15T19:00:00Z"}]. ` +
-        `Use full club names, UTC kick-off times, and include every match in that matchweek.`
-      );
-      const arr = parseJsonBlock(txt);
-      if (!arr?.length) { if (!silent) toast("Couldn't read a fixture list — try again", "err"); return null; }
+      const data = await fetchFootball("matches", { matchday: String(n) });
+      const arr = data.fixtures;
+      if (!arr?.length) { if (!silent) toast("No fixtures returned for that week", "err"); return null; }
       const existing = (await sGet(K.fixtures(n)))?.fixtures || [];
       const list = arr.slice(0, 20).map((f) => {
-        const prev = existing.find((e) => e.h === f.h && e.a === f.a);
+        const prev = existing.find((e) => nameKey(e.h) === nameKey(f.h) && nameKey(e.a) === nameKey(f.a));
         return {
           id: prev?.id || uid(),
           h: String(f.h).slice(0, 30),
           a: String(f.a).slice(0, 30),
           ko: f.ko || prev?.ko || null,
-          hs: prev?.hs ?? null,
-          as: prev?.as ?? null,
-          status: prev?.status || "upcoming",
+          hs: f.hs == null ? prev?.hs ?? null : Math.max(0, Math.min(20, +f.hs)),
+          as: f.as == null ? prev?.as ?? null : Math.max(0, Math.min(20, +f.as)),
+          status: ["upcoming", "live", "finished"].includes(f.st) ? f.st : prev?.status || "upcoming",
         };
       });
       const rec = { gw: n, fixtures: list, updatedAt: Date.now() };
@@ -3209,24 +3233,22 @@ export default function PremPredictor() {
     } finally {
       if (!silent) setBusy(false);
     }
-  }, [league, gw, toast, prunePicks, loadWeek]);
+  }, [gw, toast, prunePicks, loadWeek]);
 
   const refreshScores = useCallback(async (silent) => {
     const fx = fixtures;
     if (!fx?.fixtures?.length) { if (!silent) toast("No fixtures to check", "err"); return; }
+    if (!usesApi(fx.gw)) {
+      if (!silent) toast(`Matchweek ${fx.gw} scores are entered by hand`, "err");
+      return;
+    }
     if (!silent) setBusy(true);
     try {
-      const listStr = fx.fixtures.map((f, i) => `${i}: ${f.h} v ${f.a}`).join("; ");
-      const txt = await askClaude(
-        `Search the web for the current scores in these English Premier League matches (${league?.season || "2026/27"} season, matchweek ${fx.gw}): ${listStr}. ` +
-        `Reply with ONLY a JSON array and nothing else — no prose, no fences. ` +
-        `Format: [{"i":0,"hs":2,"as":1,"st":"finished"}]. ` +
-        `"st" is one of upcoming, live, finished. Use null for hs and as if the match has not kicked off. Include every index.`
-      );
-      const arr = parseJsonBlock(txt);
-      if (!arr?.length) { if (!silent) toast("No score update found", "err"); return; }
-      const list = fx.fixtures.map((f, i) => {
-        const u = arr.find((x) => +x.i === i);
+      const data = await fetchFootball("matches", { matchday: String(fx.gw) });
+      const upd = data.fixtures || [];
+      if (!upd.length) { if (!silent) toast("No score update found", "err"); return; }
+      const list = fx.fixtures.map((f) => {
+        const u = upd.find((x) => nameKey(x.h) === nameKey(f.h) && nameKey(x.a) === nameKey(f.a));
         if (!u) return f;
         return {
           ...f,
@@ -3244,117 +3266,27 @@ export default function PremPredictor() {
     } finally {
       if (!silent) setBusy(false);
     }
-  }, [fixtures, league, toast]);
+  }, [fixtures, toast]);
 
   /* ---- the real Premier League: standings, scorers, assists ---- */
   const eplRunning = useRef(false);
   const runEplPull = useCallback(async (silent) => {
-    const season = league?.season || "2026/27";
-    const num = (v) => (Number.isFinite(+v) ? Math.max(-200, Math.min(200, Math.round(+v))) : 0);
-    const str = (v) => String(v ?? "").slice(0, 34);
-    const notes = [];
+    // The live Premier League panel always shows the real thing, straight from
+    // the football API — standings in one call, scorers + assists in another.
     let table = [], scorers = [], assists = [];
-
-    // rows come back as bare arrays: a full twenty-club table written as objects
-    // overran the reply limit and arrived truncated, which parsed as nothing
-    // the scorers lookup comes back as an object and the table as an array, and
-    // the parser will happily find an array nested inside an object — so say which
-    const askRows = async (prompt, tokens, want = "[") => {
-      let last = "";
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const txt = await askClaude(attempt === 0 ? prompt : prompt + " Reply with the JSON only. No commentary, no explanation.", tokens);
-          last = txt || "";
-          const parsed = want === "{"
-            ? parseJsonObject(txt) || parseJsonBlock(txt)
-            : parseJsonBlock(txt) || parseJsonObject(txt);
-          if (parsed) return parsed;
-        } catch (e) {
-          last = String(e?.message || e);
-        }
-      }
-      notes.push(last ? `unreadable reply (${last.slice(0, 60)}…)` : "no reply");
-      return null;
-    };
-
-    const today = new Date().toISOString().slice(0, 10);
-    const tbl = await askRows(
-      `Today is ${today}. Search the web for the current English Premier League ${season} league table. ` +
-      `Reply with ONLY a JSON array, no prose, no fences: ` +
-      `[["Club",played,won,drawn,lost,goalDifference,points]] — one row per club, league order, all twenty. ` +
-      `No header row. If not a single match has been played yet, reply []`,
-      4000, "["
-    );
-    const tblRows = Array.isArray(tbl) ? tbl : Array.isArray(tbl?.table) ? tbl.table : null;
-    if (tblRows) {
-      const HEADERS = ["club", "team", "pos", "position", "p", "pl", "played", "pts", "points", "gd", "w", "d", "l"];
-      table = tblRows
-        .map((r) => (Array.isArray(r)
-          ? { team: str(r[0]), p: r[1], w: r[2], d: r[3], l: r[4], gd: r[5], pts: r[6] }
-          : { team: str(r.team || r.club), p: r.p ?? r.played, w: r.w ?? r.won, d: r.d ?? r.drawn, l: r.l ?? r.lost, gd: r.gd, pts: r.pts ?? r.points }))
-        // a column-heading row arrives looking like a club with letters where the
-        // numbers should be — drop it before trimming, or the real last club is lost
-        .filter((t) => t.team
-          && !HEADERS.includes(t.team.trim().toLowerCase())
-          && Number.isFinite(+t.p) && Number.isFinite(+t.pts) && String(t.p).trim() !== "")
-        .slice(0, 20)
-        .map((t, i) => ({
-          pos: i + 1, team: t.team,
-          p: num(t.p), w: num(t.w), d: num(t.d), l: num(t.l), gd: num(t.gd), pts: num(t.pts),
-        }));
-    }
-
-    // Goals and assists used to go out as one request for one object keyed
-    // "scorers" and "assists". Any other wording back — top_scorers, topScorers,
-    // goalscorers, or the two lists simply handed over as arrays — read as
-    // nothing at all, and the tab sat empty while the table beside it filled in.
-    // So: one plain array each, the same shape the table asks for and gets, and
-    // a reader that takes the list however it is labelled.
-    const listIn = (v, ...names) => {
-      if (Array.isArray(v)) return v;
-      if (!v || typeof v !== "object") return [];
-      const keys = Object.keys(v);
-      for (const want of names) {
-        const hit = keys.find((k) => k.toLowerCase().replace(/[^a-z]/g, "") === want);
-        if (hit && Array.isArray(v[hit])) return v[hit];
-      }
-      // one array in there and nothing else it could be — take it
-      const arrays = keys.filter((k) => Array.isArray(v[k]));
-      return arrays.length === 1 ? v[arrays[0]] : [];
-    };
-    const rows = (list) => (Array.isArray(list) ? list : [])
-      .map((r) => (Array.isArray(r)
-        ? { name: str(r[0]), team: str(r[1]), raw: r.slice(2).find((v) => Number.isFinite(+v) && String(v).trim() !== "") }
-        : {
-          name: str(r?.name || r?.player || r?.playerName),
-          team: str(r?.team || r?.club || r?.squad),
-          raw: r?.goals ?? r?.assists ?? r?.n ?? r?.total ?? r?.count,
-        }))
-      .filter((x) => x.name
-        && !["player", "name", "rank", "pos"].includes(x.name.trim().toLowerCase())
-        && Number.isFinite(+x.raw) && String(x.raw).trim() !== "")
-      .slice(0, 10)
-      .map((x) => ({ name: x.name, team: x.team, n: num(x.raw) }));
-
-    const askPlayers = async (what, label, ...aliases) => {
-      const got = await askRows(
-        `Today is ${today}. Search the web for the current English Premier League ${season} top ${what}. ` +
-        `Reply with ONLY a JSON array, no prose, no fences, no wrapper object: ` +
-        `[["Player name","Club",${label}]] — the top ten, best first, no header row. ` +
-        `If not a single match has been played yet, reply []`,
-        2200, "["
-      );
-      return rows(listIn(got, ...aliases));
-    };
-
-    scorers = (await askPlayers("goalscorers", "goals", "scorers", "goalscorers", "topscorers", "players"))
-      .map((x) => ({ name: x.name, team: x.team, goals: x.n }));
-    assists = (await askPlayers("assist providers", "assists", "assists", "assistproviders", "topassists", "players"))
-      .map((x) => ({ name: x.name, team: x.team, assists: x.n }));
+    const notes = [];
+    try {
+      const s = await fetchFootball("standings");
+      table = s.table || [];
+    } catch (e) { notes.push(String(e?.message || e)); }
+    try {
+      const p = await fetchFootball("scorers");
+      scorers = p.scorers || [];
+      assists = p.assists || [];
+    } catch (e) { notes.push(String(e?.message || e)); }
 
     if (!table.length && !scorers.length && !assists.length) {
-      const why = notes[0] || "nothing came back";
-      const rec = { table: [], scorers: [], assists: [], error: why, updatedAt: Date.now() };
+      const rec = { table: [], scorers: [], assists: [], error: notes[0] || "nothing came back", updatedAt: Date.now() };
       await sSet(K.epl, rec);
       setEpl(rec);
       if (!silent) toast("League lookup came back empty", "err");
@@ -3364,7 +3296,7 @@ export default function PremPredictor() {
     await sSet(K.epl, rec);
     setEpl(rec);
     if (!silent) toast(table.length ? "League data updated" : "Player lists updated");
-  }, [league, toast]);
+  }, [toast]);
 
   // a throw anywhere in the lookup used to leave the busy flag stuck on, which
   // disabled the Refresh button for the rest of the session and quietly blocked
@@ -3404,19 +3336,18 @@ export default function PremPredictor() {
   // works out which matchweek is on, loads its fixtures and any scores
   const autoSync = useCallback(async () => {
     if (!league) return;
+    const n = league.currentGw || 1;
+    // Only refresh from the real API for weeks it owns; earlier weeks are the
+    // restored, hand-managed ones and must be left exactly as they are. The week
+    // number itself is advanced by the admin (or the roll-over effect below),
+    // never jumped here — the real matchday can differ from this league's count.
+    if (!usesApi(n)) return;
     try {
-      const txt = await askClaude(
-        `Search the web for the English Premier League ${league.season} season. Work out which matchweek is in progress right now, or if none is in progress, which matchweek is next. ` +
-        `Reply with ONLY a JSON object and nothing else — no prose, no fences. ` +
-        `Format: {"gw":3,"fixtures":[{"h":"Home team","a":"Away team","ko":"2026-08-15T14:00:00Z","hs":null,"as":null,"st":"upcoming"}]}. ` +
-        `Include every match in that matchweek, full club names, UTC kick-off times, hs and as as the current score or null if it has not kicked off, st as upcoming, live or finished.`
-      );
-      const obj = parseJsonObject(txt);
-      const n = Math.max(1, Math.min(38, +obj?.gw || 0));
-      if (!n || !Array.isArray(obj.fixtures) || !obj.fixtures.length) return;
+      const data = await fetchFootball("matches", { matchday: String(n) });
+      if (!Array.isArray(data.fixtures) || !data.fixtures.length) return;
       const existing = (await sGet(K.fixtures(n)))?.fixtures || [];
-      const list = obj.fixtures.slice(0, 20).map((f) => {
-        const prev = existing.find((e) => e.h === f.h && e.a === f.a);
+      const list = data.fixtures.slice(0, 20).map((f) => {
+        const prev = existing.find((e) => nameKey(e.h) === nameKey(f.h) && nameKey(e.a) === nameKey(f.a));
         return {
           id: prev?.id || uid(),
           h: String(f.h).slice(0, 30),
@@ -3429,20 +3360,15 @@ export default function PremPredictor() {
       });
       const rec = { gw: n, fixtures: list, updatedAt: Date.now() };
       await sSet(K.fixtures(n), rec);
-      // the lookup can run ahead of us — move on at most one week at a time, and
-      // only once the week we're on has actually finished
-      const here = await sGet(K.fixtures(league.currentGw));
-      const hereDone = !!here?.fixtures?.length && here.fixtures.every(isFinished);
-      const step = n > league.currentGw && hereDone ? league.currentGw + 1 : league.currentGw;
-      const target = Math.max(league.currentGw, Math.min(n, step));
-      const nextLeague = { ...league, currentGw: target, syncedAt: Date.now() };
+      await prunePicks(n, list);
+      setFixtures(rec);
+      const nextLeague = { ...league, syncedAt: Date.now() };
       await sSet(K.league, nextLeague);
       setLeague(nextLeague);
-      if (n === target) setFixtures(rec);
     } catch {
       /* leave whatever is already stored in place */
     }
-  }, [league]);
+  }, [league, prunePicks]);
 
   useEffect(() => {
     if (!league || !me || loading || autoRef.current.pulled) return;
