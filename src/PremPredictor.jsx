@@ -951,6 +951,17 @@ function Setup({ onDone, toast }) {
     const list = names.split("\n").map((n) => n.trim()).filter(Boolean).filter((n) => n.toLowerCase() !== admin.toLowerCase());
     if (!list.length) return toast("Add at least one other player", "err");
     setBusy(true);
+    // last line of defence: never write a new league over one that already
+    // exists, and never write at all if we can't tell whether one does
+    const { ok: readOk, value: existing } = await sGetSure(K.league);
+    if (!readOk) {
+      setBusy(false);
+      return toast("Couldn't check for an existing league — try again", "err");
+    }
+    if (existing?.players?.length) {
+      setBusy(false);
+      return toast("A league already exists — reload the page", "err");
+    }
     const taken = [];
     const mk = (n, isAdmin) => {
       const p = randomPin(taken);
@@ -2937,6 +2948,8 @@ export default function PremPredictor() {
   const [seasonDeadline, setSeasonDeadline] = useState(0);
   const [busy, setBusy] = useState(false);
   const [toastMsg, setToastMsg] = useState(null);
+  // a failed read is not the same thing as an empty league — see loadAll below
+  const [loadFailed, setLoadFailed] = useState(false);
   const autoRef = useRef({ pulled: false, scored: 0, epl: 0 });
   useKeyboardInset();
 
@@ -2947,24 +2960,36 @@ export default function PremPredictor() {
 
   const gw = league?.currentGw || 1;
 
-  /* ---- initial load ---- */
-  useEffect(() => {
-    (async () => {
-      const l = await sGet(K.league);
-      setLeague(l);
-      const led = await sGet(K.ledger);
-      if (led) setLedger(led);
-      const e = await sGet(K.epl);
-      if (e) setEpl(e);
-      const sn = await sGet(K.season);
-      if (sn) setSeason(sn);
-      const fx1 = await sGet(K.fixtures(1));
-      setSeasonDeadline(deadlineOf(fx1?.fixtures));
-      // sign-in is never remembered — clear anything an earlier version stored
-      await pDel(WHOAMI);
+  /* ---- initial load ----
+     sGet swallows every failure and hands back null, which reads exactly like
+     "there is no league yet" — and that lands a player on the Setup screen,
+     one form away from writing a brand new league over the real one. So the
+     league itself is read with sGetSure, which tells absence and failure
+     apart, and a failure stops here with a retry instead of offering Setup. */
+  const loadAll = useCallback(async () => {
+    setLoadFailed(false);
+    setLoading(true);
+    const { ok, value: l } = await sGetSure(K.league);
+    if (!ok) {
+      setLoadFailed(true);
       setLoading(false);
-    })();
+      return;
+    }
+    setLeague(l);
+    const led = await sGet(K.ledger);
+    if (led) setLedger(led);
+    const e = await sGet(K.epl);
+    if (e) setEpl(e);
+    const sn = await sGet(K.season);
+    if (sn) setSeason(sn);
+    const fx1 = await sGet(K.fixtures(1));
+    setSeasonDeadline(deadlineOf(fx1?.fixtures));
+    // sign-in is never remembered — clear anything an earlier version stored
+    await pDel(WHOAMI);
+    setLoading(false);
   }, []);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
 
   const signIn = useCallback(async (u) => {
     setMe(u);
@@ -3508,6 +3533,23 @@ export default function PremPredictor() {
 
   if (!hasStore()) return shell(<div className="wrap"><div className="empty">This app needs its saved data to run, and storage isn't available here. Open it from the chat it was created in.</div></div>);
   if (loading) return shell(<div className="wrap"><div className="empty">Loading the league…</div></div>);
+  // never offer Setup on a read we couldn't complete — that is how a league
+  // gets overwritten during a storage wobble
+  if (loadFailed) {
+    return shell(
+      <div className="wrap">
+        <Panel title="Can't reach the league" tone="r">
+          <div className="panel-bd">
+            <p className="small mute" style={{ margin: "0 0 12px", lineHeight: 1.6 }}>
+              The saved league couldn't be loaded. This is almost always a passing
+              connection problem — your data is still there. Try again in a moment.
+            </p>
+            <button className="btn pri" onClick={loadAll}>Try again</button>
+          </div>
+        </Panel>
+      </div>
+    );
+  }
   if (!league) return shell(<Setup onDone={setLeague} toast={toast} />);
   if (needsRepair(league)) {
     return shell(
