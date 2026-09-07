@@ -871,6 +871,31 @@ body.kb-open .tzbar { display:none; }
   justify-content:flex-end; padding-right:12px; color:var(--yellow); font-weight:700; }
 .gwgrid .gh.gtot { color:var(--mute); font-weight:400; }
 .gwgrid .me { background:var(--tint); }
+
+/* the picks archive: every prediction submitted, one grid per matchweek */
+.pkbar { display:flex; gap:5px; overflow-x:auto; padding:10px 12px 12px;
+  -webkit-overflow-scrolling:touch; }
+.pkbar button { flex:0 0 auto; min-width:32px; padding:5px 8px; border:1px solid var(--line);
+  background:var(--panel2); color:var(--mute); border-radius:7px; font-family:var(--mono);
+  font-size:11.5px; cursor:pointer; }
+.pkbar button.on { background:var(--yellow); color:var(--on); border-color:var(--yellow);
+  font-weight:700; }
+.pkgrid { display:grid; width:max-content; min-width:100%; }
+.pkgrid > div { display:flex; align-items:center; min-height:34px; padding:0 8px;
+  border-bottom:1px solid var(--line); font-size:12.5px; }
+.pkgrid .ph { font-family:var(--mono); font-size:10px; letter-spacing:.07em; color:var(--mute);
+  text-transform:uppercase; }
+.pkgrid .pfx { position:sticky; left:0; z-index:2; background:var(--panel);
+  box-shadow:1px 0 0 var(--line); gap:5px; font-size:12px; white-space:nowrap; }
+.pkgrid .pfx .club { width:17px; height:18px; flex:0 0 auto; }
+.pkgrid .pnum { justify-content:center; font-family:var(--mono); font-size:12px; }
+.pkgrid .pft { justify-content:center; font-family:var(--mono); font-weight:700;
+  color:var(--gold); }
+.pkgrid .p5 { color:var(--green); font-weight:700; }
+.pkgrid .p2 { color:var(--cyan); }
+.pkgrid .p0 { color:var(--mute); }
+.pkgrid .pme { background:var(--tint); }
+.pkgrid .ptot { font-weight:700; border-bottom:none; }
 .gwgrid .live { color:var(--green); }
 .gwgrid .foot { border-bottom:none; }
 
@@ -2319,6 +2344,127 @@ function Season({ league, me, season, answers, deadline, gw, bonus, onSaveAnswer
   );
 }
 
+/* Every prediction anyone has submitted, matchweek by matchweek.
+
+   The picks were always kept per player per week (`preds:gw<n>:<id>`); nothing
+   new is written here, this reads them back so the whole league can see what
+   everyone called and what it scored. Weeks load on demand and stay cached for
+   the session: one week costs a fixtures read plus a read per player, and the
+   storage layer is rate limited, so fetching all 38 up front would not end well. */
+function PickArchive({ league, gw, me }) {
+  const [week, setWeek] = useState(gw);
+  const [cache, setCache] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [partial, setPartial] = useState(false);
+  const asked = useRef({});
+
+  useEffect(() => {
+    if (asked.current[week]) return;
+    asked.current[week] = true;
+    let alive = true;
+    (async () => {
+      setBusy(true);
+      const fx = await sGet(K.fixtures(week));
+      const keys = await sList(K.predsPrefix(week));
+      const picks = {};
+      let missed = false;
+      for (const key of keys) {
+        const { ok, value } = await sGetSure(key);
+        // a refused read must not read as "this player predicted nothing"
+        if (!ok) { missed = true; continue; }
+        if (value?.playerId) picks[value.playerId] = value.picks || {};
+      }
+      if (!alive) return;
+      if (missed) asked.current[week] = false;   // let it be retried
+      setCache((c) => ({ ...c, [week]: { fixtures: fx?.fixtures || [], picks } }));
+      setPartial(missed);
+      setBusy(false);
+    })();
+    return () => { alive = false; };
+  }, [week]);
+
+  const weeks = Array.from({ length: Math.max(1, gw) }, (_, i) => i + 1);
+  const data = cache[week];
+  const fixtures = [...(data?.fixtures || [])].sort((a, b) => koTime(a) - koTime(b));
+  const players = league.players;
+  const cols = `142px 46px repeat(${players.length}, 50px)`;
+
+  const cell = (pid, fx) => {
+    const pick = data?.picks?.[pid]?.[fx.id];
+    if (!pick || pick.h == null || pick.a == null) return { text: "·", cls: "p0" };
+    const pts = pointsFor(pick, fx);
+    return { text: `${pick.h}-${pick.a}`, cls: pts === 5 ? "p5" : pts === 2 ? "p2" : "p0" };
+  };
+
+  const weekTotal = (pid) =>
+    fixtures.reduce((sum, fx) => sum + pointsFor(data?.picks?.[pid]?.[fx.id], fx), 0);
+
+  return (
+    <Panel title="Everyone's predictions" tone="g" note={`MW ${week}`}>
+      <div className="pkbar">
+        {weeks.map((n) => (
+          <button key={n} className={n === week ? "on" : ""} onClick={() => setWeek(n)}>{n}</button>
+        ))}
+      </div>
+      {busy && !data ? (
+        <div className="panel-bd"><span className="small mute">Loading matchweek {week}…</span></div>
+      ) : !fixtures.length ? (
+        <div className="panel-bd">
+          <span className="small mute">No fixtures stored for matchweek {week}.</span>
+        </div>
+      ) : (
+        <>
+          <div className="gridscroll">
+            <div className="pkgrid" style={{ gridTemplateColumns: cols }}>
+              <div className="ph pfx">Match</div>
+              <div className="ph pnum">FT</div>
+              {players.map((p) => (
+                <div key={p.id} className={"ph pnum" + (p.id === me.id ? " pme" : "")}>
+                  {p.name.slice(0, 4)}
+                </div>
+              ))}
+              {fixtures.map((fx) => (
+                <Fragment key={fx.id}>
+                  <div className="pfx">
+                    <ClubBadge name={fx.h} />
+                    <ClubBadge name={fx.a} />
+                    <span>{clubOf(fx.h).s} v {clubOf(fx.a).s}</span>
+                  </div>
+                  <div className="pft">
+                    {fx.hs == null || fx.as == null ? <span className="mute">–</span> : `${fx.hs}-${fx.as}`}
+                  </div>
+                  {players.map((p) => {
+                    const c = cell(p.id, fx);
+                    return (
+                      <div key={p.id} className={`pnum ${c.cls}${p.id === me.id ? " pme" : ""}`}>
+                        {c.text}
+                      </div>
+                    );
+                  })}
+                </Fragment>
+              ))}
+              {/* points from these predictions only — the table's weekly total
+                  can differ, since it also carries admin adjustments and any
+                  season-long calls ticked off that week */}
+              <div className="ph pfx ptot">Match pts</div>
+              <div className="pnum ptot" />
+              {players.map((p) => (
+                <div key={p.id} className={"pnum ptot" + (p.id === me.id ? " pme" : "")}>
+                  {weekTotal(p.id)}
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="keyline">
+            <span>{partial ? "Some picks couldn't be loaded — reopen to retry" : "Scroll sideways for everyone"}</span>
+            <span>Green 5 · Blue 2</span>
+          </div>
+        </>
+      )}
+    </Panel>
+  );
+}
+
 function Table({ league, gw, standings, me, ledger, bonusByGw, epl, onRefreshEpl, eplBusy, settled }) {
   const [view, setView] = useState("mini");
   const [chartMode, setChartMode] = useState("points");
@@ -2396,6 +2542,7 @@ function Table({ league, gw, standings, me, ledger, bonusByGw, epl, onRefreshEpl
               <span>MW {gw} includes games in play</span>
             </div>
           </Panel>
+          <PickArchive league={league} gw={gw} me={me} />
           <p className="mono small mute" style={{ textAlign: "center", marginBottom: 20 }}>
             5 pts exact score · 2 pts right result
           </p>
@@ -2938,6 +3085,9 @@ export default function PremPredictor() {
   const [tab, setTab] = useState("predict");
   const [fixtures, setFixtures] = useState(null);
   const [allPreds, setAllPreds] = useState({});
+  // which matchweek allPreds actually describes. The ledger must never bank a
+  // week using another week's predictions — see the ledger effect below.
+  const [predsGw, setPredsGw] = useState(0);
   const [gwOpen, setGwOpen] = useState({});
   const [adjust, setAdjust] = useState({});
   const [ledger, setLedger] = useState({ byGw: {} });
@@ -2951,6 +3101,7 @@ export default function PremPredictor() {
   // a failed read is not the same thing as an empty league — see loadAll below
   const [loadFailed, setLoadFailed] = useState(false);
   const autoRef = useRef({ pulled: false, scored: 0, epl: 0 });
+  const ledgerBusy = useRef(false);
   useKeyboardInset();
 
   const toast = useCallback((msg, kind) => {
@@ -3007,11 +3158,16 @@ export default function PremPredictor() {
     setAdjust((await sGet(K.adjust(n))) || {});
     const keys = await sList(K.predsPrefix(n));
     const out = {};
+    let missed = false;
     for (const k of keys) {
-      const rec = await sGet(k);
-      if (rec?.playerId) out[rec.playerId] = rec.picks || {};
+      const { ok, value } = await sGetSure(k);
+      if (!ok) { missed = true; continue; }
+      if (value?.playerId) out[value.playerId] = value.picks || {};
     }
     setAllPreds(out);
+    // only vouch for the week once every pick actually arrived — a half-read
+    // week banked as complete is how a matchweek loses its points
+    setPredsGw(missed ? 0 : n);
     return fx;
   }, []);
 
@@ -3029,6 +3185,7 @@ export default function PremPredictor() {
     }
     // same rule as the season answers: a half-finished poll keeps what it had
     setAllPreds((prev) => (missed ? { ...prev, ...out } : out));
+    setPredsGw(n);
     setGwOpen((await sGet(K.gwOpen(n))) || {});
   }, []);
 
@@ -3181,6 +3338,20 @@ export default function PremPredictor() {
   /* ---- keep the ledger in step ---- */
   useEffect(() => {
     if (!league || !fixtures) return;
+    /* Only bank a matchweek from data that actually belongs to it.
+
+       loadWeek sets the fixtures before it has finished fetching everyone's
+       picks, so there is a window where `fixtures` is this week's but
+       `allPreds` is still the previous week's — or empty. Banking in that
+       window writes a row of zeros over real points, which is how a completed
+       matchweek can lose every point it had. Both must line up with `gw`. */
+    // `gw` is absent on the restored weeks 1-2, so only reject a record that
+    // positively disagrees — never one that simply never carried the field
+    if (fixtures.gw != null && fixtures.gw !== gw) return;
+    if (predsGw !== gw) return;
+    // one ledger write at a time: this is a read-modify-write, and two of them
+    // in flight together lose whichever week the loser of the race never saw
+    if (ledgerBusy.current) return;
     const current = ledger.byGw?.[gw] || {};
     const fresh = gwPts;
     const wasDone = !!ledger.done?.[gw];
@@ -3188,32 +3359,55 @@ export default function PremPredictor() {
     const same = Object.keys(fresh).every((k) => current[k] === fresh[k]) &&
       Object.keys(current).length === Object.keys(fresh).length && wasDone === nowDone;
     if (same) return;
+    /* Last line of defence for a week that has already been scored: if this
+       render has no predictions loaded at all and would bank a clean sweep of
+       zeros over points that are already on record, that is a read that came
+       back empty, not everyone's picks disappearing. Leave the week alone. */
+    const hadPoints = Object.values(current).some((v) => v > 0);
+    const allZero = Object.values(fresh).every((v) => !v);
+    if (hadPoints && allZero && !Object.keys(allPreds).length) return;
     const complete = fixtures.fixtures.length > 0 && fixtures.fixtures.every(isFinished);
+    ledgerBusy.current = true;
     (async () => {
-      // merge onto what's actually stored, so weeks this device never loaded survive
-      const stored = (await sGet(K.ledger)) || {};
-      const next = {
-        byGw: { ...(stored.byGw || {}), ...(ledger.byGw || {}), [gw]: fresh },
-        done: { ...(stored.done || {}), ...(ledger.done || {}), [gw]: complete },
-        // remember when each week's deadline was, so the table can tell a week
-        // that has actually started from one the matchweek counter ran ahead to
-        ko: { ...(stored.ko || {}), ...(ledger.ko || {}), [gw]: deadlineOf(fixtures.fixtures) },
-        updatedAt: Date.now(),
-      };
-      setLedger(next);
-      await sSet(K.ledger, next);
+      try {
+        // merge onto what's actually stored, so weeks this device never loaded survive
+        const stored = (await sGet(K.ledger)) || {};
+        const next = {
+          byGw: { ...(stored.byGw || {}), ...(ledger.byGw || {}), [gw]: fresh },
+          done: { ...(stored.done || {}), ...(ledger.done || {}), [gw]: complete },
+          // remember when each week's deadline was, so the table can tell a week
+          // that has actually started from one the matchweek counter ran ahead to
+          ko: { ...(stored.ko || {}), ...(ledger.ko || {}), [gw]: deadlineOf(fixtures.fixtures) },
+          updatedAt: Date.now(),
+        };
+        setLedger(next);
+        await sSet(K.ledger, next);
+      } finally {
+        ledgerBusy.current = false;
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fixtures, allPreds, league, gw, adjust]);
+  }, [fixtures, allPreds, league, gw, adjust, predsGw]);
 
   /* ---- pulling fixtures & scores ---- */
   // a fixture dropped from the week would leave everyone's pick for it stranded
   const prunePicks = useCallback(async (n, list) => {
     const live = new Set((list || []).map((f) => f.id));
     const keys = await sList(K.predsPrefix(n));
+    const records = [];
     for (const key of keys) {
       const rec = await sGet(key);
-      if (!rec?.picks) continue;
+      if (rec?.picks) records.push({ key, rec });
+    }
+    /* Dropping one fixture from a week is normal; dropping every one is not.
+       If no stored pick matches any fixture id in the new list, the ids have
+       been regenerated wholesale rather than a match being removed — pruning
+       there would delete everyone's predictions for the week. Refuse, and
+       leave the picks for a human to sort out. */
+    const anyMatch = records.some(({ rec }) => Object.keys(rec.picks).some((fid) => live.has(fid)));
+    const anyPicks = records.some(({ rec }) => Object.keys(rec.picks).length > 0);
+    if (anyPicks && !anyMatch) return;
+    for (const { key, rec } of records) {
       const kept = {};
       Object.entries(rec.picks).forEach(([fid, v]) => { if (live.has(fid)) kept[fid] = v; });
       if (Object.keys(kept).length !== Object.keys(rec.picks).length) {
@@ -3424,6 +3618,15 @@ export default function PremPredictor() {
   useEffect(() => {
     if (!league || !me || !fixtures?.fixtures?.length || gw >= 38) return;
     if (autoRef.current.rolling) return;
+    /* The fixtures on screen must be this matchweek's. Advancing the counter
+       does not itself reload them — pullFixtures below skips setFixtures
+       because it is fetching gw+1, not gw — so `gw` becomes the new week
+       while `fixtures` is still the old, finished one. Without this guard the
+       effect read that as "week complete" again and rolled on, once per
+       render, until loadWeek's async read finally landed and the fixtures
+       caught up. How far it got was purely a race: four renders of lag took
+       matchweek 3 to 7. */
+    if (fixtures.gw != null && fixtures.gw !== gw) return;
     const all = fixtures.fixtures;
     if (!all.every(isFinished)) return;
     const lastEnd = Math.max(...all.map(koTime)) + 2 * 3600e3;
@@ -3433,7 +3636,13 @@ export default function PremPredictor() {
     if (Date.now() < openAt.getTime()) return;
     autoRef.current.rolling = true;
     (async () => {
-      await pullFixtures(gw + 1, true);
+      const rec = await pullFixtures(gw + 1, true);
+      /* If the next week has already been played out, this league has fallen
+         behind the real calendar. Advancing into it would open a matchweek
+         nobody could possibly predict and score everyone zero for it, so stop
+         and leave the decision to the admin. `rolling` stays latched so this
+         does not retry on every render. */
+      if (rec?.fixtures?.length && rec.fixtures.every(isFinished)) return;
       const next = { ...league, currentGw: gw + 1, syncedAt: Date.now() };
       if (await sSet(K.league, next)) setLeague(next);
       autoRef.current.rolling = false;
