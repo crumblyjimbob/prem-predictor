@@ -2634,6 +2634,10 @@ function Admin({ league, setLeague, gw, fixtures, setFixtures, toast, pullFixtur
   const [gwInput, setGwInput] = useState(String(gw));
   const [pullGw, setPullGw] = useState(String(gw));
   const [syncing, setSyncing] = useState(false);
+  const [editGw, setEditGw] = useState(gw);
+  const [editGwInput, setEditGwInput] = useState(String(gw));
+  const [editRec, setEditRec] = useState(null);
+  const [editBusy, setEditBusy] = useState(false);
 
   const runSync = async () => {
     setSyncing(true);
@@ -2786,11 +2790,36 @@ function Admin({ league, setLeague, gw, fixtures, setFixtures, toast, pullFixtur
     if (await sSet(K.league, next)) { setLeague(next); toast(`Now on matchweek ${n}`); }
   };
 
+  /* Results can be entered for any matchweek, not just the current one.
+
+     Matchweeks before API_FROM_GW were built on the old data and the feed will
+     never score them — pullFixtures, refreshScores and autoSync all decline
+     them by design — so their results have to be typed in. Editing only the
+     current week meant moving the whole league backwards to correct an old
+     one, which is both awkward and, with the roll-over, risky. */
+  const editing = editGw === gw ? fixtures : editRec;
+
+  useEffect(() => {
+    if (editGw === gw) { setEditRec(null); return; }
+    let alive = true;
+    setEditBusy(true);
+    (async () => {
+      const rec = await sGet(K.fixtures(editGw));
+      if (!alive) return;
+      setEditRec(rec || { gw: editGw, fixtures: [] });
+      setEditBusy(false);
+    })();
+    return () => { alive = false; };
+  }, [editGw, gw]);
+
   const editFx = async (id, field, value) => {
-    const list = fixtures.fixtures.map((f) => (f.id === id ? { ...f, [field]: value } : f));
-    const next = { ...fixtures, fixtures: list, updatedAt: Date.now() };
-    setFixtures(next);
-    await sSet(K.fixtures(gw), next);
+    if (!editing?.fixtures) return;
+    const list = editing.fixtures.map((f) => (f.id === id ? { ...f, [field]: value } : f));
+    // keep the week on the record: the ledger relies on it to know that the
+    // fixtures in hand belong to the matchweek it is about to bank
+    const next = { ...editing, gw: editing.gw ?? editGw, fixtures: list, updatedAt: Date.now() };
+    if (editGw === gw) setFixtures(next); else setEditRec(next);
+    if (!(await sSet(K.fixtures(editGw), next))) toast("Couldn't save that change", "err");
   };
 
   const setScore = (id, side, raw) => {
@@ -2800,7 +2829,12 @@ function Admin({ league, setLeague, gw, fixtures, setFixtures, toast, pullFixtur
 
   return (
     <div className="wrap">
-      <Panel title="Fixtures" tone="m" note={league.syncedAt ? `Synced ${new Date(league.syncedAt).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : "Not synced yet"}>
+      <Panel title="Fixtures" tone="m"
+        note={editGw !== gw
+          ? `Editing MW ${editGw}`
+          : league.syncedAt
+            ? `Synced ${new Date(league.syncedAt).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`
+            : "Not synced yet"}>
         <div className="panel-bd">
           <div className="row" style={{ marginBottom: 10 }}>
             <button className="btn pri" onClick={runSync} disabled={syncing || busy}>
@@ -2822,15 +2856,32 @@ function Admin({ league, setLeague, gw, fixtures, setFixtures, toast, pullFixtur
               {busy ? "Looking up…" : "Pull fixtures"}
             </button>
           </div>
+          <div className="row" style={{ marginTop: 10 }}>
+            <div style={{ flex: "0 0 90px" }}>
+              <label className="lbl">Edit week</label>
+              <input className="inp mono" inputMode="numeric" value={editGwInput}
+                onChange={(e) => setEditGwInput(e.target.value.replace(/\D/g, ""))} />
+            </div>
+            <button className="btn sm" style={{ marginTop: 20 }}
+              onClick={() => setEditGw(Math.max(1, Math.min(38, +editGwInput || gw)))}>Open week</button>
+            {editGw !== gw && (
+              <button className="btn sm" style={{ marginTop: 20 }}
+                onClick={() => { setEditGw(gw); setEditGwInput(String(gw)); }}>Back to MW {gw}</button>
+            )}
+          </div>
           <p className="small mute" style={{ marginBottom: 0, lineHeight: 1.6 }}>
             Everything below is editable, and what you set here is what counts for scoring.
+            {!usesApi(editGw) && ` Matchweek ${editGw} came from the old data — the football feed never scores it, so its results are typed in here.`}
+            {" "}After changing a result for a week that is already done, hit <b>Recalculate points</b> so the table catches up.
           </p>
         </div>
-        {fixtures?.fixtures?.length ? (
+        {editBusy ? (
+          <div className="empty">Loading matchweek {editGw}…</div>
+        ) : editing?.fixtures?.length ? (
           <table className="tbl">
             <thead><tr><th>Match</th><th>Kick-off <span className="mute">Irish time</span></th><th style={{ textAlign: "right" }}>Score</th><th></th></tr></thead>
             <tbody>
-              {fixtures.fixtures.map((f) => (
+              {editing.fixtures.map((f) => (
                 <tr key={f.id}>
                   <td style={{ fontSize: 12 }}>{f.h}<br /><span className="mute">{f.a}</span></td>
                   <td>
@@ -2857,7 +2908,7 @@ function Admin({ league, setLeague, gw, fixtures, setFixtures, toast, pullFixtur
               ))}
             </tbody>
           </table>
-        ) : <div className="empty">No fixtures stored for matchweek {gw}.</div>}
+        ) : <div className="empty">No fixtures stored for matchweek {editGw}.</div>}
       </Panel>
 
       <Panel title="Matchweek" tone="m">
