@@ -586,6 +586,19 @@ const usesApi = (n) => (+n || 0) >= API_FROM_GW;
 // match clubs across sources without caring about "FC", punctuation or case
 const nameKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
+/* Plain text matching is not enough to tie a stored fixture to the API's copy
+   of it: the feed says "Brighton & Hove Albion", "Manchester City",
+   "Tottenham Hotspur", while the stored and restored data says "Brighton",
+   "Man City", "Spurs". A name that fails to match leaves the fixture with no
+   final score for the rest of the season, and everyone's points for it stuck
+   at nil. CLUBS already carries the aliases, so resolve through it and only
+   fall back to raw text for a club it does not know. */
+const teamKey = (s) => {
+  const c = clubOf(s);
+  return c.k.startsWith("gen") ? nameKey(s) : c.k;
+};
+const sameTie = (a, b) => teamKey(a?.h) === teamKey(b?.h) && teamKey(a?.a) === teamKey(b?.a);
+
 async function fetchFootball(type, params = {}) {
   const qs = new URLSearchParams({ type, ...params }).toString();
   const res = await fetch(`/api/football?${qs}`);
@@ -2399,6 +2412,10 @@ function PickArchive({ league, gw, me }) {
   const weekTotal = (pid) =>
     fixtures.reduce((sum, fx) => sum + pointsFor(data?.picks?.[pid]?.[fx.id], fx), 0);
 
+  // a match the feed never gave a result for scores nobody anything, so the
+  // column of totals reads low for a reason worth saying out loud
+  const unscored = fixtures.filter((f) => f.hs == null || f.as == null).length;
+
   return (
     <Panel title="Everyone's predictions" tone="g" note={`MW ${week}`}>
       <div className="pkbar">
@@ -2456,7 +2473,13 @@ function PickArchive({ league, gw, me }) {
             </div>
           </div>
           <div className="keyline">
-            <span>{partial ? "Some picks couldn't be loaded — reopen to retry" : "Scroll sideways for everyone"}</span>
+            <span>
+              {partial
+                ? "Some picks couldn't be loaded — reopen to retry"
+                : unscored
+                  ? `${unscored} match${unscored === 1 ? "" : "es"} without a final score — not counted yet`
+                  : "Scroll sideways for everyone"}
+            </span>
             <span>Green 5 · Blue 2</span>
           </div>
         </>
@@ -2588,7 +2611,7 @@ function Table({ league, gw, standings, me, ledger, bonusByGw, epl, onRefreshEpl
 /* ---------------------------------- admin --------------------------------- */
 
 function Admin({ league, setLeague, gw, fixtures, setFixtures, toast, pullFixtures, refreshScores,
-  autoSync, busy, allPreds, gwOpen, onSetGwOpen, gwPts, adjust, onSetAdjust, ledger }) {
+  autoSync, busy, allPreds, gwOpen, onSetGwOpen, gwPts, adjust, onSetAdjust, ledger, onRecalc }) {
   const [newName, setNewName] = useState("");
   const [newPinInput, setNewPinInput] = useState("");
   const [pinDraft, setPinDraft] = useState({});
@@ -2784,6 +2807,7 @@ function Admin({ league, setLeague, gw, fixtures, setFixtures, toast, pullFixtur
               {syncing ? "Syncing…" : "Sync now"}
             </button>
             <button className="btn" disabled={busy || syncing} onClick={() => refreshScores(false)}>Refresh scores</button>
+            <button className="btn" disabled={busy || syncing} onClick={onRecalc}>Recalculate points</button>
           </div>
           <p className="small mute" style={{ marginBottom: 10, lineHeight: 1.6 }}>
             This happens on its own — the app works out the current matchweek and loads its fixtures whenever someone
@@ -3389,6 +3413,60 @@ export default function PremPredictor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fixtures, allPreds, league, gw, adjust, predsGw]);
 
+  /* ---- rebuild the banked points from what is actually stored ----
+
+     The season table reads the ledger; the predictions archive works the points
+     out from the picks themselves. They are meant to say the same thing, and
+     they will as long as the ledger was written correctly — but a week banked
+     from a half-loaded read, or one whose final scores only landed later, stays
+     wrong until something rewrites it. This walks every matchweek reached so
+     far, recomputes it from the stored fixtures and picks exactly the way the
+     archive does, and writes the ledger to match. */
+  const recalcAll = useCallback(async () => {
+    if (!league) return;
+    setBusy(true);
+    try {
+      const stored = (await sGet(K.ledger)) || {};
+      const byGw = { ...(stored.byGw || {}) };
+      const done = { ...(stored.done || {}) };
+      const ko = { ...(stored.ko || {}) };
+      let fixed = 0, skipped = 0, noScore = 0;
+      for (let n = 1; n <= gw; n++) {
+        const fx = await sGet(K.fixtures(n));
+        const list = fx?.fixtures || [];
+        if (!list.length) continue;
+        noScore += list.filter((f) => f.hs == null || f.as == null).length;
+        const pts = {};
+        league.players.forEach((p) => { pts[p.id] = 0; });
+        let missed = false;
+        for (const key of await sList(K.predsPrefix(n))) {
+          const { ok, value } = await sGetSure(key);
+          if (!ok) { missed = true; break; }
+          if (!value?.playerId || pts[value.playerId] == null) continue;
+          list.forEach((f) => { pts[value.playerId] += pointsFor(value.picks?.[f.id], f); });
+        }
+        // a week we could not read in full must not be rewritten from a guess
+        if (missed) { skipped++; continue; }
+        const adj = (await sGet(K.adjust(n))) || {};
+        Object.entries(adj).forEach(([pid, v]) => { if (pts[pid] != null) pts[pid] += +v || 0; });
+        const was = byGw[n] || {};
+        if (league.players.some((p) => (was[p.id] || 0) !== pts[p.id])) fixed++;
+        byGw[n] = pts;
+        done[n] = list.every(isFinished);
+        ko[n] = deadlineOf(list);
+      }
+      const next = { byGw, done, ko, updatedAt: Date.now() };
+      if (!(await sSet(K.ledger, next))) return toast("Couldn't save the recalculated points", "err");
+      setLedger(next);
+      const bits = [`${fixed} week${fixed === 1 ? "" : "s"} corrected`];
+      if (skipped) bits.push(`${skipped} unreadable`);
+      if (noScore) bits.push(`${noScore} match${noScore === 1 ? "" : "es"} still without a final score`);
+      toast(bits.join(" · "));
+    } finally {
+      setBusy(false);
+    }
+  }, [league, gw, toast]);
+
   /* ---- pulling fixtures & scores ---- */
   // a fixture dropped from the week would leave everyone's pick for it stranded
   const prunePicks = useCallback(async (n, list) => {
@@ -3429,7 +3507,7 @@ export default function PremPredictor() {
       if (!arr?.length) { if (!silent) toast("No fixtures returned for that week", "err"); return null; }
       const existing = (await sGet(K.fixtures(n)))?.fixtures || [];
       const list = arr.slice(0, 20).map((f) => {
-        const prev = existing.find((e) => nameKey(e.h) === nameKey(f.h) && nameKey(e.a) === nameKey(f.a));
+        const prev = existing.find((e) => sameTie(e, f));
         return {
           id: prev?.id || uid(),
           h: String(f.h).slice(0, 30),
@@ -3467,7 +3545,7 @@ export default function PremPredictor() {
       const upd = data.fixtures || [];
       if (!upd.length) { if (!silent) toast("No score update found", "err"); return; }
       const list = fx.fixtures.map((f) => {
-        const u = upd.find((x) => nameKey(x.h) === nameKey(f.h) && nameKey(x.a) === nameKey(f.a));
+        const u = upd.find((x) => sameTie(x, f));
         if (!u) return f;
         return {
           ...f,
@@ -3566,7 +3644,7 @@ export default function PremPredictor() {
       if (!Array.isArray(data.fixtures) || !data.fixtures.length) return;
       const existing = (await sGet(K.fixtures(n)))?.fixtures || [];
       const list = data.fixtures.slice(0, 20).map((f) => {
-        const prev = existing.find((e) => nameKey(e.h) === nameKey(f.h) && nameKey(e.a) === nameKey(f.a));
+        const prev = existing.find((e) => sameTie(e, f));
         return {
           id: prev?.id || uid(),
           h: String(f.h).slice(0, 30),
@@ -3787,7 +3865,7 @@ export default function PremPredictor() {
         <Admin league={league} setLeague={setLeague} gw={gw} fixtures={fixtures} setFixtures={setFixtures}
           toast={toast} pullFixtures={pullFixtures} refreshScores={refreshScores} autoSync={autoSync} busy={busy}
           allPreds={allPreds} gwOpen={gwOpen} onSetGwOpen={setGwOpenFor}
-          gwPts={gwPts} adjust={adjust} onSetAdjust={setAdjustFor} ledger={ledger} />
+          gwPts={gwPts} adjust={adjust} onSetAdjust={setAdjustFor} ledger={ledger} onRecalc={recalcAll} />
       )}
     </>
   );
