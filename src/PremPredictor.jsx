@@ -907,6 +907,7 @@ body.kb-open .tzbar { display:none; }
 .pkgrid .p5 { color:var(--green); font-weight:700; }
 .pkgrid .p2 { color:var(--cyan); }
 .pkgrid .p0 { color:var(--mute); }
+.pkgrid .psealed { color:var(--mute); opacity:.75; }
 .pkgrid .pme { background:var(--tint); }
 .pkgrid .ptot { font-weight:700; border-bottom:none; }
 .gwgrid .live { color:var(--green); }
@@ -2402,7 +2403,20 @@ function PickArchive({ league, gw, me }) {
   const players = league.players;
   const cols = `142px 46px repeat(${players.length}, 50px)`;
 
+  /* The live matchweek stays sealed until the deadline — the same rule the
+     Scores tab uses, and for the same reason: nobody gets to read the room
+     before committing. Weeks already behind us are always open.
+
+     `isShut` is false for a deadline of 0, so a week whose kick-off times are
+     not known yet stays sealed rather than springing open. You can always see
+     your own picks; everyone else shows only whether they are in. */
+  const submitted = (pid) => Object.keys(data?.picks?.[pid] || {}).length > 0;
+  const deadline = deadlineOf(fixtures);
+  const sealed = week >= gw && !isShut(deadline);
+  const inCount = players.filter((p) => submitted(p.id)).length;
+
   const cell = (pid, fx) => {
+    if (sealed && pid !== me.id) return { text: submitted(pid) ? "✓" : "·", cls: "psealed" };
     const pick = data?.picks?.[pid]?.[fx.id];
     if (!pick || pick.h == null || pick.a == null) return { text: "·", cls: "p0" };
     const pts = pointsFor(pick, fx);
@@ -2431,6 +2445,16 @@ function PickArchive({ league, gw, me }) {
         </div>
       ) : (
         <>
+          {sealed && (
+            <div className="veil">
+              <b>Everyone's picks are sealed until the deadline.</b>
+              <span>
+                {inCount} of {players.length} {inCount === 1 ? "player has" : "players have"} put predictions in
+                {deadline > 0 ? ` — they all appear here at ${new Date(deadline).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" })}` : ", and appear once the first kick-off is known"}.
+                Your own are always visible to you.
+              </span>
+            </div>
+          )}
           <div className="gridscroll">
             <div className="pkgrid" style={{ gridTemplateColumns: cols }}>
               <div className="ph pfx">Match</div>
@@ -2467,7 +2491,7 @@ function PickArchive({ league, gw, me }) {
               <div className="pnum ptot" />
               {players.map((p) => (
                 <div key={p.id} className={"pnum ptot" + (p.id === me.id ? " pme" : "")}>
-                  {weekTotal(p.id)}
+                  {sealed && p.id !== me.id ? <span className="mute">–</span> : weekTotal(p.id)}
                 </div>
               ))}
             </div>
@@ -2476,9 +2500,11 @@ function PickArchive({ league, gw, me }) {
             <span>
               {partial
                 ? "Some picks couldn't be loaded — reopen to retry"
-                : unscored
-                  ? `${unscored} match${unscored === 1 ? "" : "es"} without a final score — not counted yet`
-                  : "Scroll sideways for everyone"}
+                : sealed
+                  ? "✓ means their picks are in — the scores show after the deadline"
+                  : unscored
+                    ? `${unscored} match${unscored === 1 ? "" : "es"} without a final score — not counted yet`
+                    : "Scroll sideways for everyone"}
             </span>
             <span>Green 5 · Blue 2</span>
           </div>
