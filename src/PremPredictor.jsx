@@ -411,6 +411,31 @@ function pointsFor(pick, fx) {
 }
 
 const koTime = (fx) => (fx.ko ? new Date(fx.ko).getTime() : 0);
+
+/* One running order for everyone, worked out from the kick-off instant.
+
+   The fixtures were previously shown in whatever order the feed happened to
+   write them in, so a re-sync could shuffle the list and two people would see
+   the same matchweek in different orders. Kick-off times are stored as UTC
+   instants, so sorting on them gives the same sequence on every device — a
+   match that kicks off first is first in Galway, Philadelphia and Sydney
+   alike, whatever local date it falls on there.
+
+   Matches sharing a kick-off need a tie-break, and it must not vary by device:
+   localeCompare can order differently under different locales, so plain < / >
+   on the name is used instead, with the fixture id to settle the rest. A
+   fixture with no kick-off time sorts last — koTime gives it 0, which would
+   otherwise put an unknown ahead of every real one. */
+const byKickoff = (a, b) => {
+  const ta = koTime(a) || Infinity;
+  const tb = koTime(b) || Infinity;
+  if (ta !== tb) return ta - tb;
+  const ha = String(a.h || ""), hb = String(b.h || "");
+  if (ha !== hb) return ha < hb ? -1 : 1;
+  const ia = String(a.id || ""), ib = String(b.id || "");
+  return ia < ib ? -1 : ia > ib ? 1 : 0;
+};
+const inOrder = (list) => [...(list || [])].sort(byKickoff);
 // one deadline for the whole week: the first kick-off in it
 const deadlineOf = (list) => {
   const times = (list || []).map(koTime).filter(Boolean);
@@ -1530,7 +1555,7 @@ function Predict({ league, gw, fixtures, myPicks, onSave, toast, me, gwOpen }) {
   // scores refreshing in the background used to reset this form mid-entry —
   // anything typed and not yet saved now survives the refresh
   useEffect(() => {
-    const list = fixtures?.fixtures || [];
+    const list = inOrder(fixtures?.fixtures);
     const key = `${gw}:${list.map((f) => f.id).join("|")}`;
     setDraft((prev) => {
       const filled = (v) => v !== undefined && v !== null && v !== "";
@@ -1591,7 +1616,7 @@ function Predict({ league, gw, fixtures, myPicks, onSave, toast, me, gwOpen }) {
     <div className="wrap">
       <Panel title={`Matchweek ${gw} — your picks`} tone="y"
         note={shut ? "Closed" : reopened ? "Opened for you" : `${missing} to fill`}>
-        {fixtures.fixtures.map((f) => {
+        {inOrder(fixtures.fixtures).map((f) => {
           const mine = myPicks?.[f.id];
           return (
             <div className="fx" key={f.id}>
@@ -1672,7 +1697,7 @@ function Scores({ league, gw, fixtures, allPreds, onRefresh, refreshing }) {
             <span>{inCount} of {league.players.length} {inCount === 1 ? "player has" : "players have"} put predictions in. They all appear here the moment the first game kicks off.</span>
           </div>
         )}
-        {fixtures.fixtures.map((f) => {
+        {inOrder(fixtures.fixtures).map((f) => {
           const rows = revealed
             ? league.players
                 .map((p) => ({ pid: p.id, name: p.name, pick: allPreds[p.id]?.[f.id] }))
@@ -2399,7 +2424,7 @@ function PickArchive({ league, gw, me }) {
 
   const weeks = Array.from({ length: Math.max(1, gw) }, (_, i) => i + 1);
   const data = cache[week];
-  const fixtures = [...(data?.fixtures || [])].sort((a, b) => koTime(a) - koTime(b));
+  const fixtures = inOrder(data?.fixtures);
   const players = league.players;
   const cols = `142px 46px repeat(${players.length}, 50px)`;
 
@@ -2907,7 +2932,7 @@ function Admin({ league, setLeague, gw, fixtures, setFixtures, toast, pullFixtur
           <table className="tbl">
             <thead><tr><th>Match</th><th>Kick-off <span className="mute">Irish time</span></th><th style={{ textAlign: "right" }}>Score</th><th></th></tr></thead>
             <tbody>
-              {editing.fixtures.map((f) => (
+              {inOrder(editing.fixtures).map((f) => (
                 <tr key={f.id}>
                   <td style={{ fontSize: 12 }}>{f.h}<br /><span className="mute">{f.a}</span></td>
                   <td>
