@@ -38,6 +38,7 @@ const CACHE = {
   standings: "public, max-age=0, s-maxage=300, stale-while-revalidate=600",
   scorers: "public, max-age=0, s-maxage=300, stale-while-revalidate=600",
   matches: "public, max-age=0, s-maxage=60, stale-while-revalidate=120",  // live scores
+  season: "public, max-age=0, s-maxage=600, stale-while-revalidate=1800",
   current: "public, max-age=0, s-maxage=3600, stale-while-revalidate=7200",
 };
 
@@ -147,6 +148,26 @@ export default async function handler(req, res) {
       }));
       res.setHeader("Cache-Control", CACHE.matches);
       res.status(200).json({ gw: md, fixtures });
+      return;
+    }
+
+    /* The whole season in one request, for the form guide: every team's recent
+       results and what they have next. Fetching it matchday by matchday would
+       be 38 calls against a ~10/min limit; this is one, and the edge holds it
+       for ten minutes so a matchweek of players share a single upstream hit. */
+    if (type === "season") {
+      const data = await fdGet("/matches", token);
+      const matches = (data.matches || []).map((m) => ({
+        h: clubName(m.homeTeam?.name),
+        a: clubName(m.awayTeam?.name),
+        ko: m.utcDate || null,
+        hs: m.score?.fullTime?.home ?? null,
+        as: m.score?.fullTime?.away ?? null,
+        st: mapStatus(m.status),
+        md: num(m.matchday),
+      }));
+      res.setHeader("Cache-Control", CACHE.season);
+      res.status(200).json({ matches });
       return;
     }
 
