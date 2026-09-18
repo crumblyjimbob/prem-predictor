@@ -492,24 +492,24 @@ function FormBox({ home, away, matches, epl, before }) {
         <Fragment key={i}>
           {i === 1 && <div className="fl-div" />}
           <div className="fl-side">
-            <div className="fl-pills">
+            <span className="fl-pos">{s.pos ? ordinal(s.pos) : "–"}</span>
+            <span className="fl-pills">
               {s.last5.length
                 ? s.last5.map((m, j) => (
                     /* the most recent match is the one that matters most, and
                        left-to-right is only a convention until something says
                        so — it is drawn larger, at full strength, and underlined */
-                    <span key={j} className={"fl-cell" + (j === s.last5.length - 1 ? " fl-latest" : "")}>
-                      <span className={"fl-pill fl-" + m.r}
-                        title={`${m.home ? "H" : "A"} v ${m.opp} ${m.gf}-${m.ga}`}>{m.r}</span>
-                    </span>
+                    <span key={j}
+                      className={"fl-pill fl-" + m.r + (j === s.last5.length - 1 ? " fl-latest" : "")}
+                      title={`${m.home ? "H" : "A"} v ${m.opp} ${m.gf}-${m.ga}`}>{m.r}</span>
                   ))
                 : <span className="fl-meta">no games yet</span>}
-            </div>
-            <div className="fl-meta">
-              {[s.pos ? ordinal(s.pos) : null,
-                s.next ? `next ${clubOf(s.next.opp).s} (${s.next.home ? "h" : "a"})` : null]
-                .filter(Boolean).join("  ·  ")}
-            </div>
+            </span>
+            {/* no brackets: "AVL a" fits a narrow phone where "AVL (a)" gets
+                truncated to "AVL…", losing the home-or-away entirely */}
+            <span className="fl-next">
+              {s.next ? <>{clubOf(s.next.opp).s}<i className="fl-ha">{s.next.home ? "h" : "a"}</i></> : "–"}
+            </span>
           </div>
         </Fragment>
       ))}
@@ -1019,19 +1019,29 @@ body.kb-open .tzbar { display:none; }
 .fl-box { grid-column:1 / -1; display:grid; grid-template-columns:1fr 1px 1fr;
   margin:4px 0 2px; border:1px solid var(--line); border-radius:9px;
   background:var(--panel2); overflow:hidden; }
-.fl-side { display:flex; flex-direction:column; align-items:center; justify-content:center;
-  gap:5px; padding:8px 6px; min-width:0; }
+/* one line per team: position on the left, the five results across the middle,
+   next opponent on the right */
+/* The results take their natural width and the two text columns share what is
+   left, truncating if the phone is narrow. The reverse — letting the middle
+   column be squeezed — makes the pills spill over the text either side, which
+   is unreadable rather than merely abbreviated. */
+.fl-side { display:grid; grid-template-columns:minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items:center; gap:4px; padding:7px 6px; min-width:0; }
 .fl-div { background:var(--line); }
-.fl-pills { display:flex; gap:4px; justify-content:center; align-items:flex-start; }
-.fl-cell { display:flex; flex-direction:column; align-items:center; gap:2px; }
-/* the latest result is drawn bigger, at full strength and underlined; the ones
-   behind it sit back a little, so the row reads forwards without a legend */
-.fl-cell::after { content:""; height:2px; width:0; border-radius:1px; }
-.fl-latest::after { width:14px; background:var(--dark); }
-.fl-cell:not(.fl-latest) .fl-pill { opacity:.72; }
-.fl-pill { width:16px; height:16px; border-radius:5px; display:flex; align-items:center;
-  justify-content:center; font-family:var(--mono); font-size:9.5px; font-weight:700; }
-.fl-latest .fl-pill { width:20px; height:20px; font-size:11.5px; border-radius:6px; }
+.fl-pos { font-family:var(--mono); font-size:9px; font-weight:700; color:var(--dark);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fl-next { font-family:var(--mono); font-size:9px; color:var(--mute); text-align:right;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fl-ha { font-style:normal; opacity:.75; margin-left:3px; }
+.fl-pills { display:flex; gap:2px; justify-content:center; align-items:center; }
+.fl-pill { width:14px; height:14px; border-radius:4px; display:flex; align-items:center;
+  justify-content:center; font-family:var(--mono); font-size:8.5px; font-weight:700;
+  opacity:.72; flex:0 0 auto; }
+/* The latest result is bigger, at full strength, and underlined. The underline
+   is drawn as an offset shadow rather than a real element so it adds no height
+   and the row stays on one line. */
+.fl-pill.fl-latest { width:18px; height:18px; font-size:10.5px; border-radius:5px; opacity:1;
+  box-shadow:0 4px 0 -1px var(--dark); }
 /* Fixed colours, deliberately not theme variables: --green is magenta in the
    Classic purple theme and --yellow turns red at Christmas. A win has to read
    as a win in every theme, so these three never move. */
