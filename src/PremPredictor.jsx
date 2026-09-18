@@ -492,7 +492,11 @@ function FormBox({ home, away, matches, epl, before }) {
         <Fragment key={i}>
           {i === 1 && <div className="fl-div" />}
           <div className="fl-side">
-            <span className="fl-pos">{s.pos ? ordinal(s.pos) : "–"}</span>
+            {/* the number carries the meaning; the suffix rides along smaller so
+                a two-digit position still fits a narrow phone */}
+            <span className="fl-pos">
+              {s.pos ? <>{s.pos}<span className="fl-ord">{ordinal(s.pos).slice(String(s.pos).length)}</span></> : "–"}
+            </span>
             <span className="fl-pills">
               {s.last5.length
                 ? s.last5.map((m, j) => (
@@ -1028,11 +1032,21 @@ body.kb-open .tzbar { display:none; }
 .fl-side { display:grid; grid-template-columns:minmax(0, 1fr) auto minmax(0, 1fr);
   align-items:center; gap:4px; padding:7px 6px; min-width:0; }
 .fl-div { background:var(--line); }
-.fl-pos { font-family:var(--mono); font-size:9px; font-weight:700; color:var(--dark);
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* the position was already bold — at 9px that was not the problem. It is the
+   one number on the line worth reading at a glance, so it gets the size too. */
+.fl-pos { font-family:var(--mono); font-size:11.5px; font-weight:800; color:var(--dark);
+  letter-spacing:-.02em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .fl-next { font-family:var(--mono); font-size:9px; color:var(--mute); text-align:right;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .fl-ha { font-style:normal; opacity:.75; margin-left:3px; }
+.fl-ord { font-size:.72em; font-weight:700; opacity:.7; }
+/* On a narrow phone the results give a little room back so a two-digit
+   position and the opponent both stay whole rather than being cut short. */
+@media (max-width: 380px) {
+  .fl-pill { width:12px; height:12px; font-size:7.5px; border-radius:3px; }
+  .fl-pill.fl-latest { width:16px; height:16px; font-size:9.5px; border-radius:4px; }
+  .fl-side { gap:3px; padding:7px 5px; }
+}
 .fl-pills { display:flex; gap:2px; justify-content:center; align-items:center; }
 .fl-pill { width:14px; height:14px; border-radius:4px; display:flex; align-items:center;
   justify-content:center; font-family:var(--mono); font-size:8.5px; font-weight:700;
