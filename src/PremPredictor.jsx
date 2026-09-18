@@ -436,6 +436,69 @@ const byKickoff = (a, b) => {
   return ia < ib ? -1 : ia > ib ? 1 : 0;
 };
 const inOrder = (list) => [...(list || [])].sort(byKickoff);
+
+/* Form for the team about to be predicted on: the last five results it took
+   into this fixture, and what it has immediately after.
+
+   Everything is cut at this fixture's own kick-off, so the strip reads as it
+   stood when the match was played rather than as it stands today — the same
+   line is then true whether you open it before the game or weeks later. */
+function formFor(matches, team, before) {
+  const key = teamKey(team);
+  const mine = (matches || []).filter((m) => teamKey(m.h) === key || teamKey(m.a) === key);
+  const side = (m) => {
+    const home = teamKey(m.h) === key;
+    return { home, gf: home ? m.hs : m.as, ga: home ? m.as : m.hs, opp: home ? m.a : m.h };
+  };
+  const played = mine
+    .filter((m) => m.hs != null && m.as != null && (!before || koTime(m) < before))
+    .sort(byKickoff);
+  const last5 = played.slice(-5).map((m) => {
+    const s = side(m);
+    return { r: s.gf > s.ga ? "W" : s.gf < s.ga ? "L" : "D", gf: s.gf, ga: s.ga, opp: s.opp, home: s.home };
+  });
+  const next = mine
+    .filter((m) => m.hs == null && m.as == null && (!before || koTime(m) > before))
+    .sort(byKickoff)[0];
+  return { last5, next: next ? side(next) : null };
+}
+
+// where the team sits in the real Premier League table, if we have it
+const posOf = (epl, team) => {
+  const key = teamKey(team);
+  return (epl?.table || []).find((r) => teamKey(r.team) === key)?.pos || null;
+};
+
+const ordinal = (n) => {
+  const t = n % 100;
+  if (t >= 11 && t <= 13) return `${n}th`;
+  return `${n}${["th", "st", "nd", "rd"][n % 10] || "th"}`;
+};
+
+/* One line per team under a fixture: where they are, how the last five went,
+   and who is next. Renders nothing at all when the season data has not
+   arrived — the tab must stay usable when the feed is unreachable. */
+function FormLine({ team, matches, epl, before }) {
+  if (!matches?.length) return null;
+  const { last5, next } = formFor(matches, team, before);
+  if (!last5.length && !next) return null;
+  const pos = posOf(epl, team);
+  return (
+    <div className="formline">
+      <span className="fl-club">{clubOf(team).s}</span>
+      <span className="fl-pos">{pos ? ordinal(pos) : ""}</span>
+      <span className="fl-pills">
+        {last5.length
+          ? last5.map((m, i) => (
+              <span key={i} className={"fl-pill fl-" + m.r}
+                title={`${m.home ? "H" : "A"} v ${m.opp} ${m.gf}-${m.ga}`}>{m.r}</span>
+            ))
+          : <span className="fl-none">no games yet</span>}
+      </span>
+      {next && <span className="fl-next">next {clubOf(next.opp).s} ({next.home ? "h" : "a"})</span>}
+    </div>
+  );
+}
 // one deadline for the whole week: the first kick-off in it
 const deadlineOf = (list) => {
   const times = (list || []).map(koTime).filter(Boolean);
@@ -933,6 +996,22 @@ body.kb-open .tzbar { display:none; }
 .pkgrid .p2 { color:var(--cyan); }
 .pkgrid .p0 { color:var(--mute); }
 .pkgrid .psealed { color:var(--mute); opacity:.75; }
+
+/* form strip: one line per team under each fixture in Predict */
+.formline { display:flex; align-items:center; gap:7px; padding:3px 12px; font-family:var(--mono);
+  font-size:10.5px; color:var(--mute); white-space:nowrap; overflow-x:auto;
+  -webkit-overflow-scrolling:touch; }
+.formline::-webkit-scrollbar { display:none; }
+.fl-club { font-weight:700; color:var(--dark); min-width:30px; }
+.fl-pos { min-width:30px; }
+.fl-pills { display:flex; gap:3px; }
+.fl-pill { width:15px; height:15px; border-radius:4px; display:flex; align-items:center;
+  justify-content:center; font-size:9px; font-weight:700; color:#fff; }
+.fl-W { background:var(--green); }
+.fl-D { background:var(--mute); }
+.fl-L { background:var(--red); }
+.fl-none { font-size:9.5px; opacity:.8; }
+.fl-next { margin-left:auto; padding-left:8px; opacity:.9; }
 .pkgrid .pme { background:var(--tint); }
 .pkgrid .ptot { font-weight:700; border-bottom:none; }
 .gwgrid .live { color:var(--green); }
@@ -1546,7 +1625,7 @@ function Login({ league, onIn, toast }) {
 
 /* ------------------------------- predictions ------------------------------ */
 
-function Predict({ league, gw, fixtures, myPicks, onSave, toast, me, gwOpen }) {
+function Predict({ league, gw, fixtures, myPicks, onSave, toast, me, gwOpen, seasonMatches, epl }) {
   const [draft, setDraft] = useState({});
   const [busy, setBusy] = useState(false);
   const [savedAt, setSavedAt] = useState(0);
@@ -1642,10 +1721,17 @@ function Predict({ league, gw, fixtures, myPicks, onSave, toast, me, gwOpen }) {
               </div>
               <div className="fx-team a"><ClubBadge name={f.a} /><span>{f.a}</span></div>
               <div className="fx-ko">{fmtKo(f)}</div>
+              <FormLine team={f.h} matches={seasonMatches} epl={epl} before={koTime(f)} />
+              <FormLine team={f.a} matches={seasonMatches} epl={epl} before={koTime(f)} />
             </div>
           );
         })}
       </Panel>
+      {seasonMatches?.length ? (
+        <p className="mono small mute" style={{ textAlign: "center", margin: "0 0 14px" }}>
+          Form runs oldest to newest · tap and hold a result for the score
+        </p>
+      ) : null}
       {!shut && (
         <div className="row savebar" style={{ margin: "0 0 20px" }}>
           <button className="btn pri" onClick={save} disabled={busy}>{busy ? "Saving…" : "Save predictions"}</button>
@@ -3219,6 +3305,8 @@ export default function PremPredictor() {
   const [ledger, setLedger] = useState({ byGw: {} });
   const [epl, setEpl] = useState(null);
   const [eplBusy, setEplBusy] = useState(false);
+  // every match of the season, for the form strips under each fixture
+  const [seasonMatches, setSeasonMatches] = useState(null);
   const [season, setSeason] = useState(emptySeason());
   const [sAnswers, setSAnswers] = useState({});
   const [seasonDeadline, setSeasonDeadline] = useState(0);
@@ -3700,6 +3788,24 @@ export default function PremPredictor() {
   // a throw anywhere in the lookup used to leave the busy flag stuck on, which
   // disabled the Refresh button for the rest of the session and quietly blocked
   // every later attempt — clear it whatever happens
+  /* One request covers the whole season, and the edge holds it for ten minutes,
+     so a matchweek of players opening the app share a single upstream call.
+     Kept in memory rather than written to storage: it is derived data that the
+     feed already caches, and it would be the largest thing in the league by far. */
+  const pullSeasonMatches = useCallback(async () => {
+    try {
+      const data = await fetchFootball("season");
+      if (Array.isArray(data.matches) && data.matches.length) setSeasonMatches(data.matches);
+    } catch {
+      /* the form strips simply do not render — Predict stays usable */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!league || !me || seasonMatches) return;
+    pullSeasonMatches();
+  }, [league, me, seasonMatches, pullSeasonMatches]);
+
   const pullEpl = useCallback(async (silent) => {
     if (eplRunning.current) return;
     eplRunning.current = true;
@@ -3950,7 +4056,7 @@ export default function PremPredictor() {
 
   return shell(
     <>
-      {tab === "predict" && <Predict league={league} gw={gw} fixtures={fixtures} myPicks={allPreds[me.id]} onSave={savePicks} toast={toast} me={me} gwOpen={gwOpen} />}
+      {tab === "predict" && <Predict league={league} gw={gw} fixtures={fixtures} myPicks={allPreds[me.id]} onSave={savePicks} toast={toast} me={me} gwOpen={gwOpen} seasonMatches={seasonMatches} epl={epl} />}
       {tab === "scores" && <Scores league={league} gw={gw} fixtures={fixtures} allPreds={allPreds}
         onRefresh={() => { loadPicks(gw); refreshScores(false); }} refreshing={busy} />}
       {tab === "season" && (
