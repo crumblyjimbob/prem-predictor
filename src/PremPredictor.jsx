@@ -475,27 +475,44 @@ const ordinal = (n) => {
   return `${n}${["th", "st", "nd", "rd"][n % 10] || "th"}`;
 };
 
-/* One line per team under a fixture: where they are, how the last five went,
-   and who is next. Renders nothing at all when the season data has not
-   arrived — the tab must stay usable when the feed is unreachable. */
-function FormLine({ team, matches, epl, before }) {
+/* Both teams' form in one box under the fixture — home on the left, away on the
+   right, matching the fixture above so neither column needs a club label.
+   Renders nothing at all when the season data has not arrived: the tab must
+   stay usable when the feed is unreachable. */
+function FormBox({ home, away, matches, epl, before }) {
   if (!matches?.length) return null;
-  const { last5, next } = formFor(matches, team, before);
-  if (!last5.length && !next) return null;
-  const pos = posOf(epl, team);
+  const sides = [home, away].map((team) => ({
+    ...formFor(matches, team, before),
+    pos: posOf(epl, team),
+  }));
+  if (!sides.some((s) => s.last5.length || s.next)) return null;
   return (
-    <div className="formline">
-      <span className="fl-club">{clubOf(team).s}</span>
-      <span className="fl-pos">{pos ? ordinal(pos) : ""}</span>
-      <span className="fl-pills">
-        {last5.length
-          ? last5.map((m, i) => (
-              <span key={i} className={"fl-pill fl-" + m.r}
-                title={`${m.home ? "H" : "A"} v ${m.opp} ${m.gf}-${m.ga}`}>{m.r}</span>
-            ))
-          : <span className="fl-none">no games yet</span>}
-      </span>
-      {next && <span className="fl-next">next {clubOf(next.opp).s} ({next.home ? "h" : "a"})</span>}
+    <div className="fl-box">
+      {sides.map((s, i) => (
+        <Fragment key={i}>
+          {i === 1 && <div className="fl-div" />}
+          <div className="fl-side">
+            <div className="fl-pills">
+              {s.last5.length
+                ? s.last5.map((m, j) => (
+                    /* the most recent match is the one that matters most, and
+                       left-to-right is only a convention until something says
+                       so — it is drawn larger, at full strength, and underlined */
+                    <span key={j} className={"fl-cell" + (j === s.last5.length - 1 ? " fl-latest" : "")}>
+                      <span className={"fl-pill fl-" + m.r}
+                        title={`${m.home ? "H" : "A"} v ${m.opp} ${m.gf}-${m.ga}`}>{m.r}</span>
+                    </span>
+                  ))
+                : <span className="fl-meta">no games yet</span>}
+            </div>
+            <div className="fl-meta">
+              {[s.pos ? ordinal(s.pos) : null,
+                s.next ? `next ${clubOf(s.next.opp).s} (${s.next.home ? "h" : "a"})` : null]
+                .filter(Boolean).join("  ·  ")}
+            </div>
+          </div>
+        </Fragment>
+      ))}
     </div>
   );
 }
@@ -997,21 +1014,32 @@ body.kb-open .tzbar { display:none; }
 .pkgrid .p0 { color:var(--mute); }
 .pkgrid .psealed { color:var(--mute); opacity:.75; }
 
-/* form strip: one line per team under each fixture in Predict */
-.formline { display:flex; align-items:center; gap:7px; padding:3px 12px; font-family:var(--mono);
-  font-size:10.5px; color:var(--mute); white-space:nowrap; overflow-x:auto;
-  -webkit-overflow-scrolling:touch; }
-.formline::-webkit-scrollbar { display:none; }
-.fl-club { font-weight:700; color:var(--dark); min-width:30px; }
-.fl-pos { min-width:30px; }
-.fl-pills { display:flex; gap:3px; }
-.fl-pill { width:15px; height:15px; border-radius:4px; display:flex; align-items:center;
-  justify-content:center; font-size:9px; font-weight:700; color:#fff; }
-.fl-W { background:var(--green); }
-.fl-D { background:var(--mute); }
-.fl-L { background:var(--red); }
-.fl-none { font-size:9.5px; opacity:.8; }
-.fl-next { margin-left:auto; padding-left:8px; opacity:.9; }
+/* form box under each fixture: home on the left, away on the right, laid out to
+   match the fixture above it so neither side needs a club label. */
+.fl-box { grid-column:1 / -1; display:grid; grid-template-columns:1fr 1px 1fr;
+  margin:4px 0 2px; border:1px solid var(--line); border-radius:9px;
+  background:var(--panel2); overflow:hidden; }
+.fl-side { display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:5px; padding:8px 6px; min-width:0; }
+.fl-div { background:var(--line); }
+.fl-pills { display:flex; gap:4px; justify-content:center; align-items:flex-start; }
+.fl-cell { display:flex; flex-direction:column; align-items:center; gap:2px; }
+/* the latest result is drawn bigger, at full strength and underlined; the ones
+   behind it sit back a little, so the row reads forwards without a legend */
+.fl-cell::after { content:""; height:2px; width:0; border-radius:1px; }
+.fl-latest::after { width:14px; background:var(--dark); }
+.fl-cell:not(.fl-latest) .fl-pill { opacity:.72; }
+.fl-pill { width:16px; height:16px; border-radius:5px; display:flex; align-items:center;
+  justify-content:center; font-family:var(--mono); font-size:9.5px; font-weight:700; }
+.fl-latest .fl-pill { width:20px; height:20px; font-size:11.5px; border-radius:6px; }
+/* Fixed colours, deliberately not theme variables: --green is magenta in the
+   Classic purple theme and --yellow turns red at Christmas. A win has to read
+   as a win in every theme, so these three never move. */
+.fl-W { background:#15803D; color:#FFFFFF; }
+.fl-D { background:#EAB308; color:#3B2A00; }
+.fl-L { background:#DC2626; color:#FFFFFF; }
+.fl-meta { font-family:var(--mono); font-size:9.5px; color:var(--mute); text-align:center;
+  line-height:1.45; }
 .pkgrid .pme { background:var(--tint); }
 .pkgrid .ptot { font-weight:700; border-bottom:none; }
 .gwgrid .live { color:var(--green); }
@@ -1721,15 +1749,14 @@ function Predict({ league, gw, fixtures, myPicks, onSave, toast, me, gwOpen, sea
               </div>
               <div className="fx-team a"><ClubBadge name={f.a} /><span>{f.a}</span></div>
               <div className="fx-ko">{fmtKo(f)}</div>
-              <FormLine team={f.h} matches={seasonMatches} epl={epl} before={koTime(f)} />
-              <FormLine team={f.a} matches={seasonMatches} epl={epl} before={koTime(f)} />
+              <FormBox home={f.h} away={f.a} matches={seasonMatches} epl={epl} before={koTime(f)} />
             </div>
           );
         })}
       </Panel>
       {seasonMatches?.length ? (
         <p className="mono small mute" style={{ textAlign: "center", margin: "0 0 14px" }}>
-          Form runs oldest to newest · tap and hold a result for the score
+          Oldest to newest — the underlined tile is the latest · hold one for the score
         </p>
       ) : null}
       {!shut && (
